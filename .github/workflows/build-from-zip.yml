@@ -53,7 +53,6 @@ jobs:
           echo "Project root: $ROOT"
           echo "root=$ROOT" >> $GITHUB_OUTPUT
 
-          # نمایش محتوای فایل‌های ریشه برای دیباگ
           echo "=== settings.gradle ==="
           cat settings.gradle 2>/dev/null || cat settings.gradle.kts 2>/dev/null || echo "(missing)"
           echo "=== build.gradle (root) ==="
@@ -102,6 +101,100 @@ jobs:
           chmod +x gradlew
           echo "Project ready."
 
+      # ============================================================
+      # 🔧 Auto-patch deprecated APIs (این Step جدید است)
+      # ============================================================
+      - name: Auto-patch deprecated APIs
+        run: |
+          set -e
+          ROOT="${{ steps.prepare.outputs.root }}"
+          echo "Patching deprecated APIs in: $ROOT"
+
+          # شمارنده برای گزارش
+          PATCHED=0
+
+          # -----------------------------------------------------------------
+          # 1) WebSettings.MIXED_CONTENT_ALWAYS_ALLOW → MIXED_CONTENT_COMPATIBILITY_MODE
+          #    حذف‌شده در API 34
+          # -----------------------------------------------------------------
+          FILES=$(grep -rl "MIXED_CONTENT_ALWAYS_ALLOW" "$ROOT" --include="*.kt" --include="*.java" 2>/dev/null || true)
+          if [ -n "$FILES" ]; then
+            echo "$FILES" | while read -r f; do
+              echo "  Patched: $f"
+              sed -i 's/WebSettings\.MIXED_CONTENT_ALWAYS_ALLOW/WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE/g' "$f"
+              sed -i 's/import android\.webkit\.WebSettings\.MIXED_CONTENT_ALWAYS_ALLOW/import android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE/g' "$f"
+            done
+            PATCHED=$((PATCHED + 1))
+          fi
+
+          # -----------------------------------------------------------------
+          # 2) BLUETOOTH / BLUETOOTH_ADMIN → BLUETOOTH_CONNECT / BLUETOOTH_SCAN
+          #    deprecated در API 31
+          # -----------------------------------------------------------------
+          # این را در AndroidManifest.xml هم چک می‌کنیم
+          MANIFEST="$ROOT/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST" ]; then
+            if grep -q 'android.permission.BLUETOOTH"' "$MANIFEST" 2>/dev/null; then
+              echo "  Bluetooth permission detected - leaving as-is (may need runtime request)"
+            fi
+          fi
+
+          # -----------------------------------------------------------------
+          # 3) Environment.getExternalStorageDirectory() → getExternalFilesDir()
+          #    deprecated در API 29
+          # -----------------------------------------------------------------
+          FILES=$(grep -rl "Environment.getExternalStorageDirectory()" "$ROOT" --include="*.kt" --include="*.java" 2>/dev/null || true)
+          if [ -n "$FILES" ]; then
+            echo "$FILES" | while read -r f; do
+              echo "  WARNING: $f uses deprecated getExternalStorageDirectory() - not auto-patched (needs manual fix)"
+            done
+          fi
+
+          # -----------------------------------------------------------------
+          # 4) PackageManager.getInstalledPackages (بدون پارامتر) → با پارامتر
+          #    deprecated از API 33
+          # -----------------------------------------------------------------
+          FILES=$(grep -rl "getInstalledPackages()" "$ROOT" --include="*.kt" --include="*.java" 2>/dev/null || true)
+          if [ -n "$FILES" ]; then
+            echo "$FILES" | while read -r f; do
+              echo "  Patched: $f (getInstalledPackages → getInstalledPackages(0))"
+              sed -i 's/getInstalledPackages()/getInstalledPackages(0)/g' "$f"
+            done
+            PATCHED=$((PATCHED + 1))
+          fi
+
+          # -----------------------------------------------------------------
+          # 5) registerReceiver بدون flag → با RECEIVER_NOT_EXPORTED
+          #    الزامی از API 34
+          # -----------------------------------------------------------------
+          FILES=$(grep -rl "registerReceiver(.*IntentFilter" "$ROOT" --include="*.kt" --include="*.java" 2>/dev/null || true)
+          if [ -n "$FILES" ]; then
+            echo "$FILES" | while read -r f; do
+              echo "  NOTE: $f calls registerReceiver - may need RECEIVER_NOT_EXPORTED on API 34"
+            done
+          fi
+
+          # -----------------------------------------------------------------
+          # 6) پاک کردن importهای شبح‌زده و استفاده‌نشده (اختیاری)
+          # -----------------------------------------------------------------
+          # (اینجا کار خاصی نمی‌کنیم - کامپایلر خودش ignore می‌کند)
+
+          echo ""
+          echo "=========================================="
+          echo "Auto-patch completed."
+          echo "Patched categories: $PATCHED"
+          echo "=========================================="
+
+          # نمایش خلاصه‌ای از تغییرات در فایل‌های کاتلین
+          echo ""
+          echo "=== Final state of patched files (first 5 lines each) ==="
+          find "$ROOT" -name "*.kt" -newer "$ROOT/gradlew" 2>/dev/null | while read -r f; do
+            echo "--- $f ---"
+            head -5 "$f"
+          done
+
+      # ============================================================
+
       - name: Show app/build.gradle
         run: |
           cat "${{ steps.prepare.outputs.root }}/app/build.gradle" || true
@@ -115,7 +208,6 @@ jobs:
           echo "Exit code: ${PIPESTATUS[0]}"
           exit ${PIPESTATUS[0]}
 
-      # این Step همیشه اجرا می‌شود، حتی اگر Build شکست خورده باشد
       - name: Upload build log (always)
         if: always()
         uses: actions/upload-artifact@v4
