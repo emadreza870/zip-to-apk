@@ -13,35 +13,50 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # ------------------------------------------------------------
+      # 1) دریافت کد ریپازیتوری
+      # ------------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ------------------------------------------------------------
+      # 2) نصب JDK 17
+      # ------------------------------------------------------------
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: 'temurin'
 
+      # ------------------------------------------------------------
+      # 3) نصب Gradle برای تولید Wrapper در صورت نیاز
+      # ------------------------------------------------------------
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
+      # ------------------------------------------------------------
+      # 4) استخراج فایل ZIP آپلودشده
+      # ------------------------------------------------------------
       - name: Extract uploaded ZIP
         run: |
           echo "Extracting: ${{ inputs.project_zip }}"
           if [ ! -f "${{ inputs.project_zip }}" ]; then
-            echo "ZIP file not found!"
+            echo "ZIP file not found in repository root!"
             ls -la
             exit 1
           fi
           unzip -o "${{ inputs.project_zip }}" -d ./project
+          echo "Top-level contents:"
           find ./project -maxdepth 4 -type f | head -40
 
+      # ------------------------------------------------------------
+      # 5) آماده‌سازی پروژه (تولید فایل‌های ریشه در صورت نبودن)
+      # ------------------------------------------------------------
       - name: Prepare project
         id: prepare
         run: |
-          set -e
           MANIFEST=$(find ./project -name "AndroidManifest.xml" -path "*/src/main/*" | head -n 1)
           if [ -z "$MANIFEST" ]; then
             echo "AndroidManifest.xml not found!"
@@ -60,6 +75,7 @@ jobs:
 
           if [ ! -f "gradlew" ]; then
             echo "Generating Gradle wrapper..."
+
             if [ ! -f "settings.gradle" ] && [ ! -f "settings.gradle.kts" ]; then
               cat > settings.gradle << 'SETTINGS_EOF'
           pluginManagement {
@@ -80,6 +96,7 @@ jobs:
           include ':app'
           SETTINGS_EOF
             fi
+
             if [ ! -f "build.gradle" ] && [ ! -f "build.gradle.kts" ]; then
               cat > build.gradle << 'ROOT_EOF'
           plugins {
@@ -88,6 +105,7 @@ jobs:
           }
           ROOT_EOF
             fi
+
             if [ ! -f "gradle.properties" ]; then
               cat > gradle.properties << 'PROPS_EOF'
           org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
@@ -96,22 +114,23 @@ jobs:
           android.nonTransitiveRClass=true
           PROPS_EOF
             fi
+
             gradle wrapper --gradle-version 8.7
           fi
+
           chmod +x gradlew
           echo "Project ready."
 
-      # ============================================================
-      # 🔧 Auto-patch deprecated APIs (این Step جدید است)
-      # ============================================================
-            - name: Auto-patch deprecated APIs
+      # ------------------------------------------------------------
+      # 6) پچ خودکار APIهای حذف‌شده در API 34
+      # ------------------------------------------------------------
+      - name: Auto-patch deprecated APIs
         run: |
           ROOT="${{ steps.prepare.outputs.root }}"
           echo "================================================"
           echo "Auto-patch starting. ROOT=$ROOT"
           echo "================================================"
 
-          # نمایش فایل هدف قبل از پچ
           MAIN="$ROOT/app/src/main/java/com/cookieexporter/nonroot/MainActivity.kt"
           if [ -f "$MAIN" ]; then
             echo "=== MainActivity.kt lines 80-95 BEFORE patch ==="
@@ -123,7 +142,7 @@ jobs:
           grep -rln "MIXED_CONTENT_ALWAYS_ALLOW" "$ROOT" \
             --include="*.kt" --include="*.java" 2>/dev/null || echo "(none found)"
 
-          # پچ سراسری: هر جای عبارت را عوض کن (چه با WebSettings. چه بدون آن)
+          # پچ سراسری: هر دو حالت با/بدون WebSettings. را پوشش می‌دهد
           find "$ROOT" \( -name "*.kt" -o -name "*.java" \) -type f -print0 \
             | while IFS= read -r -d '' f; do
                 if grep -q "MIXED_CONTENT_ALWAYS_ALLOW" "$f"; then
@@ -143,25 +162,44 @@ jobs:
 
           echo ""
           echo "=== Remaining MIXED_CONTENT_ALWAYS_ALLOW references ==="
-          grep -rln "MIXED_CONTENT_ALWAYS_ALLOW" "$ROOT" \
-            --include="*.kt" --include="*.java" 2>/dev/null && echo "STILL PRESENT!" || echo "(clean)"
+          if grep -rln "MIXED_CONTENT_ALWAYS_ALLOW" "$ROOT" \
+               --include="*.kt" --include="*.java" 2>/dev/null; then
+            echo "STILL PRESENT!"
+          else
+            echo "(clean)"
+          fi
+
+          # پچ‌های مکمل (اختیاری - برای خطاهای رایج دیگر)
+          find "$ROOT" \( -name "*.kt" -o -name "*.java" \) -type f -print0 \
+            | while IFS= read -r -d '' f; do
+                # getInstalledPackages() بدون پارامتر → با پارامتر 0
+                sed -i 's/getInstalledPackages()/getInstalledPackages(0)/g' "$f"
+              done
 
           echo "Auto-patch done."
-      # ============================================================
 
+      # ------------------------------------------------------------
+      # 7) نمایش app/build.gradle برای دیباگ
+      # ------------------------------------------------------------
       - name: Show app/build.gradle
         run: |
           cat "${{ steps.prepare.outputs.root }}/app/build.gradle" || true
 
+      # ------------------------------------------------------------
+      # 8) ساخت APK دیباگ
+      # ------------------------------------------------------------
       - name: Build Debug APK
         id: build
         continue-on-error: true
         working-directory: ${{ steps.prepare.outputs.root }}
         run: |
-          ./gradlew assembleDebug --stacktrace --no-daemon --warning-mode all 2>&1 | tee build-output.log
+          ./gradlew assembleDebug --stacktrace --no-daemon 2>&1 | tee build-output.log
           echo "Exit code: ${PIPESTATUS[0]}"
           exit ${PIPESTATUS[0]}
 
+      # ------------------------------------------------------------
+      # 9) آپلود لاگ ساخت (همیشه، حتی در صورت شکست)
+      # ------------------------------------------------------------
       - name: Upload build log (always)
         if: always()
         uses: actions/upload-artifact@v4
@@ -170,6 +208,9 @@ jobs:
           path: ${{ steps.prepare.outputs.root }}/build-output.log
           retention-days: 7
 
+      # ------------------------------------------------------------
+      # 10) پیدا کردن APK ساخته‌شده
+      # ------------------------------------------------------------
       - name: Locate APK
         id: find_apk
         if: steps.build.outcome == 'success'
@@ -182,6 +223,9 @@ jobs:
           echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
           echo "APK: $APK_PATH"
 
+      # ------------------------------------------------------------
+      # 11) آپلود APK نهایی
+      # ------------------------------------------------------------
       - name: Upload APK
         if: steps.build.outcome == 'success'
         uses: actions/upload-artifact@v4
