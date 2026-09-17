@@ -53,9 +53,14 @@ jobs:
           echo "Project root: $ROOT"
           echo "root=$ROOT" >> $GITHUB_OUTPUT
 
-          if [ ! -f "gradlew" ]; then
-            echo "Generating missing Gradle root files..."
+          # نمایش محتوای فایل‌های ریشه برای دیباگ
+          echo "=== settings.gradle ==="
+          cat settings.gradle 2>/dev/null || cat settings.gradle.kts 2>/dev/null || echo "(missing)"
+          echo "=== build.gradle (root) ==="
+          cat build.gradle 2>/dev/null || cat build.gradle.kts 2>/dev/null || echo "(missing)"
 
+          if [ ! -f "gradlew" ]; then
+            echo "Generating Gradle wrapper..."
             if [ ! -f "settings.gradle" ] && [ ! -f "settings.gradle.kts" ]; then
               cat > settings.gradle << 'SETTINGS_EOF'
           pluginManagement {
@@ -76,7 +81,6 @@ jobs:
           include ':app'
           SETTINGS_EOF
             fi
-
             if [ ! -f "build.gradle" ] && [ ! -f "build.gradle.kts" ]; then
               cat > build.gradle << 'ROOT_EOF'
           plugins {
@@ -85,7 +89,6 @@ jobs:
           }
           ROOT_EOF
             fi
-
             if [ ! -f "gradle.properties" ]; then
               cat > gradle.properties << 'PROPS_EOF'
           org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
@@ -94,24 +97,36 @@ jobs:
           android.nonTransitiveRClass=true
           PROPS_EOF
             fi
-
             gradle wrapper --gradle-version 8.7
           fi
-
           chmod +x gradlew
           echo "Project ready."
 
-      - name: Show app/build.gradle for debugging
+      - name: Show app/build.gradle
         run: |
           cat "${{ steps.prepare.outputs.root }}/app/build.gradle" || true
 
       - name: Build Debug APK
+        id: build
+        continue-on-error: true
         working-directory: ${{ steps.prepare.outputs.root }}
         run: |
-          ./gradlew assembleDebug --stacktrace --no-daemon
+          ./gradlew assembleDebug --stacktrace --no-daemon --warning-mode all 2>&1 | tee build-output.log
+          echo "Exit code: ${PIPESTATUS[0]}"
+          exit ${PIPESTATUS[0]}
+
+      # این Step همیشه اجرا می‌شود، حتی اگر Build شکست خورده باشد
+      - name: Upload build log (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ steps.prepare.outputs.root }}/build-output.log
+          retention-days: 7
 
       - name: Locate APK
         id: find_apk
+        if: steps.build.outcome == 'success'
         run: |
           APK_PATH=$(find ./project -name "*.apk" -type f | head -n 1)
           if [ -z "$APK_PATH" ]; then
@@ -122,6 +137,7 @@ jobs:
           echo "APK: $APK_PATH"
 
       - name: Upload APK
+        if: steps.build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: app-debug-apk
