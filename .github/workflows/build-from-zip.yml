@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       project_zip:
-        description: 'نام فایل ZIP پروژه اندروید (مثلاً app.zip)'
+        description: 'نام فایل ZIP (مثلاً app.zip)'
         required: true
         type: string
 
@@ -22,7 +22,6 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      # نصب Gradle سیستمی برای تولید Wrapper
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -30,103 +29,85 @@ jobs:
 
       - name: Extract uploaded ZIP
         run: |
-          echo "🔍 استخراج: ${{ inputs.project_zip }}"
+          echo "Extracting: ${{ inputs.project_zip }}"
           if [ ! -f "${{ inputs.project_zip }}" ]; then
-            echo "❌ فایل ZIP پیدا نشد!"
+            echo "ZIP file not found!"
             ls -la
             exit 1
           fi
           unzip -o "${{ inputs.project_zip }}" -d ./project
-          echo "✅ محتویات پروژه:"
-          find ./project -maxdepth 3 -type f | head -30
+          find ./project -maxdepth 4 -type f | head -40
 
-      - name: Prepare project (auto-fix missing files)
+      - name: Prepare project
         id: prepare
         run: |
           set -e
-          # پیدا کردن AndroidManifest.xml و مسیر ماژول app
           MANIFEST=$(find ./project -name "AndroidManifest.xml" -path "*/src/main/*" | head -n 1)
           if [ -z "$MANIFEST" ]; then
-            echo "❌ AndroidManifest.xml پیدا نشد!"
+            echo "AndroidManifest.xml not found!"
             exit 1
           fi
           APP_DIR=$(dirname "$(dirname "$(dirname "$MANIFEST")")")
           ROOT=$(dirname "$APP_DIR")
-          APP_NAME=$(basename "$APP_DIR")
-          echo "📁 ماژول app: $APP_DIR"
-          echo "📁 ریشه پروژه: $ROOT"
-
           cd "$ROOT"
+          echo "Project root: $ROOT"
+          echo "root=$ROOT" >> $GITHUB_OUTPUT
 
-          # اگر gradlew نبود، فایل‌های ریشه را می‌سازیم
           if [ ! -f "gradlew" ]; then
-            echo "🔧 فایل‌های Gradle گم‌شده‌اند. در حال ساخت..."
+            echo "Generating missing Gradle root files..."
 
-            # settings.gradle
             if [ ! -f "settings.gradle" ] && [ ! -f "settings.gradle.kts" ]; then
-              cat > settings.gradle << 'EOF'
-pluginManagement {
-    repositories {
-        google()
-        mavenCentral()
-        gradlePluginPortal()
-    }
-}
-dependencyResolutionManagement {
-    repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
-    repositories {
-        google()
-        mavenCentral()
-    }
-}
-rootProject.name = "MyApp"
-include ':app'
-EOF
+              cat > settings.gradle << 'SETTINGS_EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "MyApp"
+          include ':app'
+          SETTINGS_EOF
             fi
 
-            # build.gradle ریشه
             if [ ! -f "build.gradle" ] && [ ! -f "build.gradle.kts" ]; then
-              cat > build.gradle << 'EOF'
-plugins {
-    id 'com.android.application' version '8.5.0' apply false
-    id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
-}
-EOF
+              cat > build.gradle << 'ROOT_EOF'
+          plugins {
+              id 'com.android.application' version '8.5.0' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.24' apply false
+          }
+          ROOT_EOF
             fi
 
-            # gradle.properties
             if [ ! -f "gradle.properties" ]; then
-              cat > gradle.properties << 'EOF'
-org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
-android.useAndroidX=true
-kotlin.code.style=official
-android.nonTransitiveRClass=true
-EOF
+              cat > gradle.properties << 'PROPS_EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          android.nonTransitiveRClass=true
+          PROPS_EOF
             fi
 
-            # تولید Gradle Wrapper
             gradle wrapper --gradle-version 8.7
           fi
 
           chmod +x gradlew
-          echo "root=$ROOT" >> $GITHUB_OUTPUT
-          echo "✅ پروژه آماده است."
+          echo "Project ready."
 
-      - name: Ensure app/build.gradle uses compatible plugin syntax
+      - name: Show app/build.gradle for debugging
         run: |
-          set -e
-          ROOT="${{ steps.prepare.outputs.root }}"
-          APP_BUILD="$ROOT/app/build.gradle"
-          if [ ! -f "$APP_BUILD" ]; then
-            APP_BUILD="$ROOT/app/build.gradle.kts"
-          fi
-          echo "📄 محتوای app/build.gradle:"
-          cat "$APP_BUILD"
+          cat "${{ steps.prepare.outputs.root }}/app/build.gradle" || true
 
       - name: Build Debug APK
         working-directory: ${{ steps.prepare.outputs.root }}
         run: |
-          echo "🔨 در حال ساخت APK..."
           ./gradlew assembleDebug --stacktrace --no-daemon
 
       - name: Locate APK
@@ -134,12 +115,11 @@ EOF
         run: |
           APK_PATH=$(find ./project -name "*.apk" -type f | head -n 1)
           if [ -z "$APK_PATH" ]; then
-            echo "❌ APK ساخته نشد."
-            find ./project -name "*.apk"
+            echo "No APK produced."
             exit 1
           fi
           echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
-          echo "📦 APK: $APK_PATH"
+          echo "APK: $APK_PATH"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
