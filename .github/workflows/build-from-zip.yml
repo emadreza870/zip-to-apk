@@ -104,95 +104,49 @@ jobs:
       # ============================================================
       # 🔧 Auto-patch deprecated APIs (این Step جدید است)
       # ============================================================
-      - name: Auto-patch deprecated APIs
+            - name: Auto-patch deprecated APIs
         run: |
-          set -e
           ROOT="${{ steps.prepare.outputs.root }}"
-          echo "Patching deprecated APIs in: $ROOT"
+          echo "================================================"
+          echo "Auto-patch starting. ROOT=$ROOT"
+          echo "================================================"
 
-          # شمارنده برای گزارش
-          PATCHED=0
-
-          # -----------------------------------------------------------------
-          # 1) WebSettings.MIXED_CONTENT_ALWAYS_ALLOW → MIXED_CONTENT_COMPATIBILITY_MODE
-          #    حذف‌شده در API 34
-          # -----------------------------------------------------------------
-          FILES=$(grep -rl "MIXED_CONTENT_ALWAYS_ALLOW" "$ROOT" --include="*.kt" --include="*.java" 2>/dev/null || true)
-          if [ -n "$FILES" ]; then
-            echo "$FILES" | while read -r f; do
-              echo "  Patched: $f"
-              sed -i 's/WebSettings\.MIXED_CONTENT_ALWAYS_ALLOW/WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE/g' "$f"
-              sed -i 's/import android\.webkit\.WebSettings\.MIXED_CONTENT_ALWAYS_ALLOW/import android.webkit.WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE/g' "$f"
-            done
-            PATCHED=$((PATCHED + 1))
+          # نمایش فایل هدف قبل از پچ
+          MAIN="$ROOT/app/src/main/java/com/cookieexporter/nonroot/MainActivity.kt"
+          if [ -f "$MAIN" ]; then
+            echo "=== MainActivity.kt lines 80-95 BEFORE patch ==="
+            sed -n '80,95p' "$MAIN" || true
           fi
-
-          # -----------------------------------------------------------------
-          # 2) BLUETOOTH / BLUETOOTH_ADMIN → BLUETOOTH_CONNECT / BLUETOOTH_SCAN
-          #    deprecated در API 31
-          # -----------------------------------------------------------------
-          # این را در AndroidManifest.xml هم چک می‌کنیم
-          MANIFEST="$ROOT/app/src/main/AndroidManifest.xml"
-          if [ -f "$MANIFEST" ]; then
-            if grep -q 'android.permission.BLUETOOTH"' "$MANIFEST" 2>/dev/null; then
-              echo "  Bluetooth permission detected - leaving as-is (may need runtime request)"
-            fi
-          fi
-
-          # -----------------------------------------------------------------
-          # 3) Environment.getExternalStorageDirectory() → getExternalFilesDir()
-          #    deprecated در API 29
-          # -----------------------------------------------------------------
-          FILES=$(grep -rl "Environment.getExternalStorageDirectory()" "$ROOT" --include="*.kt" --include="*.java" 2>/dev/null || true)
-          if [ -n "$FILES" ]; then
-            echo "$FILES" | while read -r f; do
-              echo "  WARNING: $f uses deprecated getExternalStorageDirectory() - not auto-patched (needs manual fix)"
-            done
-          fi
-
-          # -----------------------------------------------------------------
-          # 4) PackageManager.getInstalledPackages (بدون پارامتر) → با پارامتر
-          #    deprecated از API 33
-          # -----------------------------------------------------------------
-          FILES=$(grep -rl "getInstalledPackages()" "$ROOT" --include="*.kt" --include="*.java" 2>/dev/null || true)
-          if [ -n "$FILES" ]; then
-            echo "$FILES" | while read -r f; do
-              echo "  Patched: $f (getInstalledPackages → getInstalledPackages(0))"
-              sed -i 's/getInstalledPackages()/getInstalledPackages(0)/g' "$f"
-            done
-            PATCHED=$((PATCHED + 1))
-          fi
-
-          # -----------------------------------------------------------------
-          # 5) registerReceiver بدون flag → با RECEIVER_NOT_EXPORTED
-          #    الزامی از API 34
-          # -----------------------------------------------------------------
-          FILES=$(grep -rl "registerReceiver(.*IntentFilter" "$ROOT" --include="*.kt" --include="*.java" 2>/dev/null || true)
-          if [ -n "$FILES" ]; then
-            echo "$FILES" | while read -r f; do
-              echo "  NOTE: $f calls registerReceiver - may need RECEIVER_NOT_EXPORTED on API 34"
-            done
-          fi
-
-          # -----------------------------------------------------------------
-          # 6) پاک کردن importهای شبح‌زده و استفاده‌نشده (اختیاری)
-          # -----------------------------------------------------------------
-          # (اینجا کار خاصی نمی‌کنیم - کامپایلر خودش ignore می‌کند)
 
           echo ""
-          echo "=========================================="
-          echo "Auto-patch completed."
-          echo "Patched categories: $PATCHED"
-          echo "=========================================="
+          echo "=== Files containing MIXED_CONTENT_ALWAYS_ALLOW ==="
+          grep -rln "MIXED_CONTENT_ALWAYS_ALLOW" "$ROOT" \
+            --include="*.kt" --include="*.java" 2>/dev/null || echo "(none found)"
 
-          # نمایش خلاصه‌ای از تغییرات در فایل‌های کاتلین
+          # پچ سراسری: هر جای عبارت را عوض کن (چه با WebSettings. چه بدون آن)
+          find "$ROOT" \( -name "*.kt" -o -name "*.java" \) -type f -print0 \
+            | while IFS= read -r -d '' f; do
+                if grep -q "MIXED_CONTENT_ALWAYS_ALLOW" "$f"; then
+                  echo "  Patching: $f"
+                  sed -i \
+                    -e 's/WebSettings\.MIXED_CONTENT_ALWAYS_ALLOW/WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE/g' \
+                    -e 's/MIXED_CONTENT_ALWAYS_ALLOW/MIXED_CONTENT_COMPATIBILITY_MODE/g' \
+                    "$f"
+                fi
+              done
+
           echo ""
-          echo "=== Final state of patched files (first 5 lines each) ==="
-          find "$ROOT" -name "*.kt" -newer "$ROOT/gradlew" 2>/dev/null | while read -r f; do
-            echo "--- $f ---"
-            head -5 "$f"
-          done
+          if [ -f "$MAIN" ]; then
+            echo "=== MainActivity.kt lines 80-95 AFTER patch ==="
+            sed -n '80,95p' "$MAIN" || true
+          fi
 
+          echo ""
+          echo "=== Remaining MIXED_CONTENT_ALWAYS_ALLOW references ==="
+          grep -rln "MIXED_CONTENT_ALWAYS_ALLOW" "$ROOT" \
+            --include="*.kt" --include="*.java" 2>/dev/null && echo "STILL PRESENT!" || echo "(clean)"
+
+          echo "Auto-patch done."
       # ============================================================
 
       - name: Show app/build.gradle
