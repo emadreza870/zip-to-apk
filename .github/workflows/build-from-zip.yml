@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       project_zip:
-        description: 'فایل ZIP پروژه اندروید را آپلود کنید'
+        description: 'نام فایل ZIP پروژه اندروید (مثلاً my-project.zip)'
         required: true
         type: string
 
@@ -13,54 +13,60 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # ۱. دریافت کد ریپازیتوری
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ۲. نصب Java 17
+      # ✅ نسخه v5 و بدون cache
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: 'gradle'
 
-      # ۳. استخراج فایل ZIP آپلودشده
       - name: Extract uploaded ZIP
         run: |
-          echo "🔍 در حال استخراج فایل ZIP..."
+          echo "🔍 در حال استخراج فایل ZIP: ${{ inputs.project_zip }}"
+          if [ ! -f "${{ inputs.project_zip }}" ]; then
+            echo "❌ فایل ZIP پیدا نشد! مطمئن شوید فایل را در ریشه ریپازیتوری قرار داده‌اید."
+            ls -la
+            exit 1
+          fi
           unzip -o "${{ inputs.project_zip }}" -d ./project
           echo "✅ محتویات پروژه:"
           ls -la ./project
 
-      # ۴. پیدا کردن مسیر ریشه پروژه (جایی که gradlew قرار دارد)
       - name: Locate project root
         id: find_root
         run: |
           ROOT=$(find ./project -name "gradlew" -type f | head -n 1 | xargs dirname)
+          if [ -z "$ROOT" ]; then
+            echo "❌ فایل gradlew پیدا نشد! پروژه باید Gradle Wrapper داشته باشد."
+            find ./project -maxdepth 3 -type f | head -50
+            exit 1
+          fi
           echo "project_root=$ROOT" >> $GITHUB_OUTPUT
           echo "📁 مسیر ریشه پروژه: $ROOT"
 
-      # ۵. دادن دسترسی اجرا به gradlew
       - name: Make gradlew executable
         run: chmod +x ${{ steps.find_root.outputs.project_root }}/gradlew
 
-      # ۶. ساخت APK دیباگ
       - name: Build Debug APK
         working-directory: ${{ steps.find_root.outputs.project_root }}
         run: |
           echo "🔨 در حال ساخت APK..."
           ./gradlew assembleDebug --stacktrace
 
-      # ۷. پیدا کردن فایل APK ساخته‌شده
       - name: Locate APK
         id: find_apk
         run: |
           APK_PATH=$(find ./project -name "*.apk" -type f | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "❌ هیچ فایل APK ساخته نشد."
+            exit 1
+          fi
           echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
           echo "📦 فایل APK پیدا شد: $APK_PATH"
 
-      # ۸. آپلود APK به‌عنوان Artifact
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
