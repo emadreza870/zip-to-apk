@@ -4,56 +4,92 @@ on:
   workflow_dispatch:
     inputs:
       project_zip:
-        description: 'نام فایل ZIP (مثلاً app.zip)'
+        description: 'نام فایل ZIP پروژه (مثلاً app.zip)'
         required: true
         type: string
+        default: 'app.zip'
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
+      # ============================================================
+      # 1) دریافت کد ریپازیتوری
+      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ============================================================
+      # 2) نصب JDK 17
+      # ============================================================
       - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: 'temurin'
 
+      # ============================================================
+      # 3) نصب Gradle برای تولید Wrapper
+      # ============================================================
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
 
+      # ============================================================
+      # 4) استخراج فایل ZIP
+      # ============================================================
       - name: Extract uploaded ZIP
         run: |
-          echo "Extracting: ${{ inputs.project_zip }}"
-          if [ ! -f "${{ inputs.project_zip }}" ]; then
-            echo "ZIP file not found in repository root!"
+          ZIP_NAME="${{ inputs.project_zip }}"
+          echo "📦 Extracting: $ZIP_NAME"
+
+          if [ ! -f "$ZIP_NAME" ]; then
+            echo "❌ ZIP file not found in repository root!"
+            echo "Files in repository root:"
             ls -la
             exit 1
           fi
-          unzip -o "${{ inputs.project_zip }}" -d ./project
+
+          unzip -o "$ZIP_NAME" -d ./project
+
+          echo ""
+          echo "📂 Top-level contents:"
           find ./project -maxdepth 4 -type f | head -40
 
+      # ============================================================
+      # 5) آماده‌سازی پروژه (تولید فایل‌های ریشه گم‌شده)
+      # ============================================================
       - name: Prepare project
         id: prepare
         run: |
+          set -e
+
           MANIFEST=$(find ./project -name "AndroidManifest.xml" -path "*/src/main/*" | head -n 1)
           if [ -z "$MANIFEST" ]; then
-            echo "AndroidManifest.xml not found!"
+            echo "❌ AndroidManifest.xml not found!"
             exit 1
           fi
+
           APP_DIR=$(dirname "$(dirname "$(dirname "$MANIFEST")")")
           ROOT=$(dirname "$APP_DIR")
           cd "$ROOT"
-          echo "Project root: $ROOT"
+
+          echo "📁 Project root: $ROOT"
           echo "root=$ROOT" >> $GITHUB_OUTPUT
 
+          echo ""
+          echo "=== settings.gradle ==="
+          cat settings.gradle 2>/dev/null || cat settings.gradle.kts 2>/dev/null || echo "(missing)"
+          echo ""
+          echo "=== build.gradle (root) ==="
+          cat build.gradle 2>/dev/null || cat build.gradle.kts 2>/dev/null || echo "(missing)"
+
           if [ ! -f "gradlew" ]; then
-            echo "Generating Gradle wrapper..."
+            echo ""
+            echo "🔧 Generating missing Gradle files..."
+
             if [ ! -f "settings.gradle" ] && [ ! -f "settings.gradle.kts" ]; then
               cat > settings.gradle << 'SETTINGS_EOF'
           pluginManagement {
@@ -74,6 +110,7 @@ jobs:
           include ':app'
           SETTINGS_EOF
             fi
+
             if [ ! -f "build.gradle" ] && [ ! -f "build.gradle.kts" ]; then
               cat > build.gradle << 'ROOT_EOF'
           plugins {
@@ -82,6 +119,7 @@ jobs:
           }
           ROOT_EOF
             fi
+
             if [ ! -f "gradle.properties" ]; then
               cat > gradle.properties << 'PROPS_EOF'
           org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
@@ -90,26 +128,79 @@ jobs:
           android.nonTransitiveRClass=true
           PROPS_EOF
             fi
+
             gradle wrapper --gradle-version 8.7
           fi
-          chmod +x gradlew
-          echo "Project ready."
 
-      - name: Auto-patch deprecated APIs (Python)
+          chmod +x gradlew
+          echo "✅ Project ready."
+
+      # ============================================================
+      # 6) پچ هوشمند APIهای deprecated
+      # ============================================================
+      - name: Auto-patch deprecated APIs
         run: |
           ROOT="${{ steps.prepare.outputs.root }}"
           python3 - "$ROOT" << 'PYEOF'
           import os, sys, re
+
           root = sys.argv[1]
-          print(f"Auto-patch root: {root}")
+          print(f"🔧 Auto-patch root: {root}")
+          print()
+
+          # --------------------------------------------------------
+          # الگوهای پچ (ترتیب مهم است)
+          # --------------------------------------------------------
           patterns = [
+              # 1) اصلاح کلاس اشتباه: WebView.MIXED_CONTENT_* → WebSettings.MIXED_CONTENT_*
+              (r'\bWebView\.(MIXED_CONTENT_\w+)', r'WebSettings.\1',
+               'WebView.MIXED_CONTENT_* → WebSettings.MIXED_CONTENT_*'),
+
+              # 2) اصلاح نام ثابت حذف‌شده: ALWAYS_ALLOW → COMPATIBILITY_MODE
               (r'\bMIXED_CONTENT_ALWAYS_ALLOW\b', 'MIXED_CONTENT_COMPATIBILITY_MODE',
                'MIXED_CONTENT_ALWAYS_ALLOW → COMPATIBILITY_MODE'),
+
+              # 3) getInstalledPackages() بدون پارامتر → با پارامتر
               (r'\bgetInstalledPackages\s*\(\s*\)', 'getInstalledPackages(0)',
                'getInstalledPackages() → getInstalledPackages(0)'),
+
+              # 4) registerReceiver بدون flag (فقط هشدار - اصلاح دستی لازم است)
+              # این را به‌عنوان پچ نمی‌زنیم چون ریسک تغییر رفتار دارد.
           ]
+
+          # --------------------------------------------------------
+          # تابع کمکی: افزودن import در صورت نیاز
+          # --------------------------------------------------------
+          def ensure_websettings_import(content, is_kotlin):
+              if 'WebSettings.' not in content:
+                  return content, False
+
+              if is_kotlin:
+                  if re.search(r'^import\s+android\.webkit\.WebSettings\s*$', content, re.MULTILINE):
+                      return content, False
+                  imports = list(re.finditer(r'^import\s+.*$', content, re.MULTILINE))
+                  if imports:
+                      last = imports[-1]
+                      return content[:last.end()] + '\nimport android.webkit.WebSettings' + content[last.end():], True
+                  pkg = re.search(r'^package\s+.*$', content, re.MULTILINE)
+                  if pkg:
+                      return content[:pkg.end()] + '\n\nimport android.webkit.WebSettings' + content[pkg.end():], True
+              else:
+                  if re.search(r'^import\s+android\.webkit\.WebSettings\s*;', content, re.MULTILINE):
+                      return content, False
+                  imports = list(re.finditer(r'^import\s+.*;$', content, re.MULTILINE))
+                  if imports:
+                      last = imports[-1]
+                      return content[:last.end()] + '\nimport android.webkit.WebSettings;' + content[last.end():], True
+              return content, False
+
+          # --------------------------------------------------------
+          # پردازش فایل‌ها
+          # --------------------------------------------------------
           total_files = 0
           total_changes = 0
+          imports_added = 0
+
           for dirpath, _, filenames in os.walk(root):
               for fname in filenames:
                   if not (fname.endswith('.kt') or fname.endswith('.java')):
@@ -119,24 +210,65 @@ jobs:
                       with open(fpath, 'r', encoding='utf-8') as f:
                           content = f.read()
                   except Exception as e:
-                      print(f"  Skip {fpath}: {e}")
+                      print(f"  ⚠ Skip {fpath}: {e}")
                       continue
+
                   original = content
                   changes_here = 0
+
                   for regex, repl, desc in patterns:
                       new_content, n = re.subn(regex, repl, content)
                       if n > 0:
-                          print(f"  [{fname}] {desc}: {n} occurrence(s)")
+                          rel = os.path.relpath(fpath, root)
+                          print(f"  ✔ [{rel}] {desc}: {n}×")
                           content = new_content
                           changes_here += n
+
                   if content != original:
+                      content, added = ensure_websettings_import(content, fname.endswith('.kt'))
+                      if added:
+                          rel = os.path.relpath(fpath, root)
+                          print(f"  ✔ [{rel}] Added: import android.webkit.WebSettings")
+                          imports_added += 1
+
                       with open(fpath, 'w', encoding='utf-8') as f:
                           f.write(content)
                       total_files += 1
                       total_changes += changes_here
-          print(f"Patched {total_changes} occurrence(s) in {total_files} file(s).")
-          print("")
-          print("=== Final check ===")
+
+          print()
+          print("=" * 55)
+          print(f"📊 Patched {total_changes} occurrence(s) in {total_files} file(s)")
+          print(f"📊 Added {imports_added} WebSettings import(s)")
+          print("=" * 55)
+
+          # --------------------------------------------------------
+          # بررسی نهایی: خط mixedContentMode
+          # --------------------------------------------------------
+          print()
+          print("🔍 Final check — lines containing 'mixedContentMode':")
+          found = False
+          for dirpath, _, filenames in os.walk(root):
+              for fname in filenames:
+                  if fname.endswith('.kt') or fname.endswith('.java'):
+                      fpath = os.path.join(dirpath, fname)
+                      try:
+                          with open(fpath, 'r', encoding='utf-8') as f:
+                              for i, line in enumerate(f, 1):
+                                  if 'mixedContentMode' in line:
+                                      rel = os.path.relpath(fpath, root)
+                                      print(f"  {rel}:{i}: {line.strip()}")
+                                      found = True
+                      except:
+                          pass
+          if not found:
+              print("  (no mixedContentMode usage found)")
+
+          # --------------------------------------------------------
+          # بررسی نهایی: باقی‌مانده MIXED_CONTENT_ALWAYS_ALLOW
+          # --------------------------------------------------------
+          print()
+          print("🔍 Final check — remaining 'MIXED_CONTENT_ALWAYS_ALLOW':")
           remaining = 0
           for dirpath, _, filenames in os.walk(root):
               for fname in filenames:
@@ -145,52 +277,61 @@ jobs:
                       try:
                           with open(fpath, 'r', encoding='utf-8') as f:
                               if 'MIXED_CONTENT_ALWAYS_ALLOW' in f.read():
-                                  print(f"  STILL PRESENT: {fpath}")
+                                  rel = os.path.relpath(fpath, root)
+                                  print(f"  ⚠ STILL PRESENT: {rel}")
                                   remaining += 1
-                      except: pass
+                      except:
+                          pass
           if remaining == 0:
-              print("  (clean)")
+              print("  ✅ (clean)")
           PYEOF
 
-      - name: Dump MainActivity.kt for debugging
-        run: |
-          ROOT="${{ steps.prepare.outputs.root }}"
-          echo "================ FULL MainActivity.kt ================"
-          find "$ROOT" -name "MainActivity.kt" -type f -print0 | while IFS= read -r -d '' f; do
-            echo "--- $f ---"
-            cat -n "$f"
-          done
-          echo "================ END ================"
-
+      # ============================================================
+      # 7) ساخت APK
+      # ============================================================
       - name: Build Debug APK
         id: build
         continue-on-error: true
         working-directory: ${{ steps.prepare.outputs.root }}
         run: |
+          echo "🔨 Building APK..."
           ./gradlew assembleDebug --stacktrace --no-daemon 2>&1 | tee build-output.log
-          echo "Exit code: ${PIPESTATUS[0]}"
-          exit ${PIPESTATUS[0]}
+          EXIT_CODE=${PIPESTATUS[0]}
+          echo ""
+          echo "Exit code: $EXIT_CODE"
+          exit $EXIT_CODE
 
-      - name: Upload build log (always)
+      # ============================================================
+      # 8) آپلود لاگ ساخت (همیشه)
+      # ============================================================
+      - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
           path: ${{ steps.prepare.outputs.root }}/build-output.log
           retention-days: 7
+          if-no-files-found: warn
 
+      # ============================================================
+      # 9) پیدا کردن APK
+      # ============================================================
       - name: Locate APK
         id: find_apk
         if: steps.build.outcome == 'success'
         run: |
           APK_PATH=$(find ./project -name "*.apk" -type f | head -n 1)
           if [ -z "$APK_PATH" ]; then
-            echo "No APK produced."
+            echo "❌ No APK produced despite successful build!"
+            find ./project -name "*.apk"
             exit 1
           fi
+          echo "✅ APK found: $APK_PATH"
           echo "apk_path=$APK_PATH" >> $GITHUB_OUTPUT
-          echo "APK: $APK_PATH"
 
+      # ============================================================
+      # 10) آپلود APK نهایی
+      # ============================================================
       - name: Upload APK
         if: steps.build.outcome == 'success'
         uses: actions/upload-artifact@v4
@@ -198,3 +339,22 @@ jobs:
           name: app-debug-apk
           path: ${{ steps.find_apk.outputs.apk_path }}
           retention-days: 30
+          if-no-files-found: error
+
+      # ============================================================
+      # 11) نمایش خلاصه نتیجه در Job Summary
+      # ============================================================
+      - name: Job summary
+        if: always()
+        run: |
+          echo "## 📱 Build Result" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.build.outcome }}" = "success" ]; then
+            echo "✅ **Build succeeded!**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "📦 Download the **app-debug-apk** artifact above." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Build failed.**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "📄 Download the **build-log** artifact and check the `FAILURE:` section." >> $GITHUB_STEP_SUMMARY
+          fi
